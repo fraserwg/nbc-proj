@@ -1,6 +1,4 @@
-
 import logging
-from typing import overload
 
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S',
@@ -9,23 +7,23 @@ logging.basicConfig(format='%(asctime)s - %(message)s',
 
 logging.info('Importing standard python libraries')
 from pathlib import Path
-from os import cpu_count
 
 logging.info('Importing third party python libraries')
 import numpy as np
-from scipy.sparse.linalg import eigs
-import scipy.sparse as sps
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from matplotlib import font_manager as fm
 from matplotlib.ticker import EngFormatter, ScalarFormatter
 import xarray as xr
 import cmocean.cm as cmo
-from joblib import Parallel, delayed
-from MITgcmutils.mds import rdmds
+import xmitgcm
+import f90nml
+import zarr
 
 logging.info('Importing custom python libraries')
 import pvcalc
+from importlib import reload
+reload(pvcalc)
 
 logging.info('Setting paths')
 base_path = Path('../../').absolute().resolve()
@@ -35,13 +33,20 @@ data_path = base_path / 'data'
 raw_path = data_path / 'raw'
 processed_path = data_path / 'processed'
 interim_path = data_path / 'interim'
-run_path = interim_path / '2DStandardNoSlip'
+run_folder = raw_path / 'mitgcm-models-2d'
+run_names = ['StandardNoSlip', 'ViscousNoSlip']
 
 
 logging.info('Setting plotting defaults')
 # fonts
-fpath = Path('/System/Library/Fonts/Supplemental/PTSans.ttc')
-if fpath.exists():
+if Path('/System/Library/Fonts/Supplemental/PTSans.ttc').exists():
+    fpath = Path('/System/Library/Fonts/Supplemental/PTSans.ttc')
+elif Path('/home/n01/n01/fwg/.local/share/fonts/PTSans-Regular.ttf').exists():
+    fpath = Path('/home/n01/n01/fwg/.local/share/fonts/PTSans-Regular.ttf')
+else:
+    fpath = None
+if fpath != None:
+    print(fpath)
     font_prop = fm.FontProperties(fname=fpath)
     plt.rcParams['font.family'] = font_prop.get_family()
     plt.rcParams['font.sans-serif'] = [font_prop.get_name()]
@@ -55,43 +60,47 @@ plt.rcParams['axes.titlesize'] = 12
 # output
 dpi = 600
 
-potential_vorticity = False
-overturning_streamfunction = False
 
-ds = xr.open_mfdataset(run_path.glob('proc*.nc'))
-ds = ds.drop_vars(['XC', 'XG'])
-ds = ds.rename_dims({'X': 'XC', 'Xp1': 'XG', 'T': 'time'})
-ds = ds.rename_vars({'X': 'XC', 'Xp1': 'XG', 'T': 'time'})
-ds = ds.assign_coords({'YC': [1]})
-ds = ds.assign_coords({'YG': [1]})
-ds['Zp1'] = ('Zp1', np.append(ds['Z'].values, -1500))
-ds['Zu'] = ('Zu', ds['Zp1'].values[1:])
-ds = ds.isel(XG=slice(1, None))
-
-ds['rhoRef'] = ('Z', 1023.35 * (1 - 2e-4 * rdmds(str(run_path / 'Tref')).squeeze()))
-
-if potential_vorticity:
-    logging.info('Calculating C grid PV')
+def open_dataset(run_name):
+    run_path = run_folder / run_name
     
-    no_slip_bottom = True
-    no_slip_sides = True
-    beta = 0
-    f0 = 1.01e-5
+    logging.info('Reading in model parameters from the namelist')
+    with open(run_path / 'data') as data:
+        data_nml = f90nml.read(data)
 
+    delta_t = data_nml['parm03']['deltat']
+    f0 = data_nml['parm01']['f0']
+    try:
+        beta = data_nml['parm01']['beta']
+    except KeyError:
+        beta = 0
+    no_slip_bottom = data_nml['parm01']['no_slip_bottom']
+    no_slip_sides = data_nml['parm01']['no_slip_sides']
+
+
+    logging.info('Reading in the model dataset')
+    ds = xmitgcm.open_mdsdataset(run_path,
+                                prefix=['ZLevelVars', 'IntLevelVars'],
+                                delta_t=delta_t,
+                                geometry='cartesian',
+                                chunks=-1
+                                )
+
+
+    logging.info('Calculating the potential vorticity')
     grid = pvcalc.create_xgcm_grid(ds)
-    ds['drL'] = ('Zl', pvcalc.create_drL_from_dataset(ds).values)
+    ds['drL'] = pvcalc.create_drL_from_dataset(ds)
     ds['rho'] = pvcalc.calculate_density(ds['RHOAnoma'], ds['rhoRef'])
     ds['b'] = pvcalc.calculate_buoyancy(ds['rho'])
 
-    ds['db_dx'], ds['db_dy'], ds['db_dz'] = pvcalc.calculate_grad_buoyancy(ds['b'] * xr.ones_like(ds['YC']), ds, grid, diff_y=False)
+    ds['db_dx'], ds['db_dy'], ds['db_dz'] = pvcalc.calculate_grad_buoyancy(ds['b'], ds, grid)
 
     ds['zeta_x'], ds['zeta_y'], ds['zeta_z'] = pvcalc.calculate_curl_velocity(ds['UVEL'],
                                                                             ds['VVEL'],
                                                                             ds['WVEL'],
                                                                             ds,
                                                                             grid,no_slip_bottom,
-                                                                            no_slip_sides,
-                                                                            diff_y=False
+                                                                            no_slip_sides, diff_y=False
                                                                             )
 
 
@@ -102,9 +111,15 @@ if potential_vorticity:
                                                     ds,
                                                     grid,
                                                     beta,
-                                                    f0,
-                                                    diff_y=False
+                                                    f0, diff_y=False
                                                     )
+
+    return ds
+
+potential_vorticity = True
+
+if potential_vorticity:
+    ds = open_dataset('StandardNoSlip')
     logging.info('Plotting the PV')
     clim = 2e-9
     
@@ -123,14 +138,14 @@ if potential_vorticity:
     ax1 = fig.add_subplot(gs[0, 1])
     cax1 = ax1.pcolormesh(ds['XG'] * 1e-3,
                           -ds['Zl'],
-                          ds['Q'].isel(YG=0).sel(time=2 * 7 * 24 * 60 * 60, method='nearest'),
+                          ds['Q'].isel(YG=0).sel(time=np.timedelta64(14, 'D'), method='nearest'),
                           cmap=cmo.curl, shading='nearest',
                           vmin=-clim, vmax=clim, rasterized=True)
 
     ax2 = fig.add_subplot(gs[0, 2])
     cax2 = ax2.pcolormesh(ds['XG'] * 1e-3,
                           -ds['Zl'],
-                          ds['Q'].isel(YG=0).sel(time=4 * 7 * 24 * 60 * 60, method='nearest'),
+                          ds['Q'].isel(YG=0).sel(time=np.timedelta64(28, 'D'), method='nearest'),
                           cmap=cmo.curl, shading='nearest',
                           vmin=-clim, vmax=clim, rasterized=True)
 
@@ -172,93 +187,20 @@ if potential_vorticity:
 
     fig.savefig(figure_path / '2d_pv.pdf', dpi=dpi)
 
-if overturning_streamfunction:
-    ds['psir'] = ds['psi'].rolling(dim={'time': 44}, center=True).mean()
-
-    clim = 3
-    
-    fig = plt.figure(figsize=[6, 4])
-    gs = gridspec.GridSpec(2, 3,
-                           height_ratios=[14, 1])
-    
-    ax0 = fig.add_subplot(gs[0, 0])
-    
-    cax0 = ax0.pcolormesh(ds['XC'] * 1e-3,
-                          -ds['Zl'],
-                          ds['psir'].sel(time=1 * 7 * 24 * 60 * 60, method='nearest'),
-                          cmap=cmo.balance, shading='nearest',
-                          vmin=-clim, vmax=clim, rasterized=True)
-    
-    ax1 = fig.add_subplot(gs[0, 1])
-    cax1 = ax1.pcolormesh(ds['XC'] * 1e-3,
-                          -ds['Zl'],
-                          ds['psir'].sel(time=3 * 7 * 24 * 60 * 60, method='nearest'),
-                          cmap=cmo.balance, shading='nearest',
-                          vmin=-clim, vmax=clim, rasterized=True)
-
-    ax2 = fig.add_subplot(gs[0, 2])
-    cax2 = ax2.pcolormesh(ds['XC'] * 1e-3,
-                          -ds['Zl'],
-                          ds['psir'].sel(time=5 * 7 * 24 * 60 * 60, method='nearest'),
-                          cmap=cmo.balance, shading='nearest',
-                          vmin=-clim, vmax=clim, rasterized=True)
-
-    ax0.set_ylim(1200, 0)
-    ax1.set_ylim(1200, 0)
-    ax2.set_ylim(1200, 0)
-
-    ax0.set_facecolor('grey')
-    ax1.set_facecolor('grey')
-    ax2.set_facecolor('grey')
-
-    ax0.set_xlim(0, 200)
-    ax1.set_xlim(0, 200)
-    ax2.set_xlim(0, 200)
-
-    ax0.set_title('1 weeks')
-    ax1.set_title('3 weeks')
-    ax2.set_title('5 weeks')
-    
-    ax0.set_title('(a)', loc='left')
-    ax1.set_title('(b)', loc='left')
-    ax2.set_title('(c)', loc='left')
-
-    fig.suptitle('Overturning streamfunction in a 2D model')
-
-    ax0.set_ylabel('Depth (m)')
-    ax1.set_xlabel('Longitude (km)')
-
-    ax1.set_yticklabels([])
-    ax2.set_yticklabels([])
-    
-    fmt = ScalarFormatter(useMathText=True)
-    fmt.set_powerlimits((0, 0))
-    cbax = fig.add_subplot(gs[1, :])
-    cb = fig.colorbar(cax0, cax=cbax, orientation='horizontal',
-                      label='$\psi$ (m$^2\\,$s$^{-1}$)', format=fmt)
-
-    fig.tight_layout()
-
-    fig.savefig(figure_path / '2d_overturning.pdf', dpi=dpi)
-
 
 def create_encoding_for_ds(ds, clevel):
     compressor = zarr.Blosc(cname="zstd", clevel=clevel, shuffle=2)
     enc = {x: {"compressor": compressor} for x in ds}
     return enc
 
-days = 24 * 60 * 60
-
 
 wvel_subsetting = True
 if wvel_subsetting:
-    runs = ['2DStandardNoSlip', '2DViscousNoSlip']
-    for run in runs[:1]:
-        run_path = interim_path / run / 'procVELO.nc'
-        ds = xr.open_dataset(run_path)
-        t = np.arange(0, 50 * days, 7 * days)
-        ds_subset = ds['WVEL'].sel(T=t, Zl=-50, method='nearest').to_dataset(name='WVEL')
-        out_name = processed_path / ('2DWVEL50m' + run_name + '.zarr')
+    for run in run_names:
+        ds = open_dataset(run)
+        t = np.arange(0, np.timedelta64(50, 'D'), np.timedelta64(7, 'D'))
+        ds_subset = ds['WVEL'].sel(time=t, Zl=-50, method='nearest').to_dataset(name='WVEL')
+        out_name = processed_path / ('WVEL50m2D' + run + '.zarr')
         print(out_name)
         enc = create_encoding_for_ds(ds_subset, 5)
         ds_subset.to_zarr(out_name, mode='w', encoding=enc)
