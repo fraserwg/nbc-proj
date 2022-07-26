@@ -116,7 +116,7 @@ def open_dataset(run_name):
 
     return ds
 
-potential_vorticity = True
+potential_vorticity = False
 
 if potential_vorticity:
     ds = open_dataset('StandardNoSlip')
@@ -194,7 +194,7 @@ def create_encoding_for_ds(ds, clevel):
     return enc
 
 
-wvel_subsetting = True
+wvel_subsetting = False
 if wvel_subsetting:
     for run in run_names:
         ds = open_dataset(run)
@@ -204,3 +204,88 @@ if wvel_subsetting:
         print(out_name)
         enc = create_encoding_for_ds(ds_subset, 5)
         ds_subset.to_zarr(out_name, mode='w', encoding=enc)
+        
+        
+streamfunction = True
+if streamfunction:
+    ds = open_dataset('StandardNoSlip')
+    ds_invert_z = ds.isel(Z=slice(None, None, -1),
+                          Zl=slice(None, None, -1),
+                          Zp1=slice(None, None, -1),
+                          Zu=slice(None, None, -1))
+    grid = pvcalc.create_xgcm_grid(ds_invert_z)
+    
+    ds['psi'] = - grid.cumsum(ds_invert_z['UVEL'] * -ds_invert_z['drF'],
+                              'Z', to={'Z': 'right'},
+                              boundary='extend')
+    
+    ds['psir'] = ds['psi'].rolling(dim={'time': 44}, center=True).mean().squeeze()
+
+    clim = 3
+    
+    fig = plt.figure(figsize=[6, 4])
+    gs = gridspec.GridSpec(2, 3,
+                           height_ratios=[14, 1])
+    
+    ax0 = fig.add_subplot(gs[0, 0])
+    
+    cax0 = ax0.pcolormesh(ds['XC'] * 1e-3,
+                          -ds['Zl'],
+                          ds['psir'].sel(time=np.timedelta64(7, 'D'),
+                                         method='nearest'),
+                          cmap=cmo.balance, shading='nearest',
+                          vmin=-clim, vmax=clim, rasterized=True)
+    
+    ax1 = fig.add_subplot(gs[0, 1])
+    cax1 = ax1.pcolormesh(ds['XC'] * 1e-3,
+                          -ds['Zl'],
+                          ds['psir'].sel(time=np.timedelta64(21, 'D'),
+                                         method='nearest'),
+                          cmap=cmo.balance, shading='nearest',
+                          vmin=-clim, vmax=clim, rasterized=True)
+
+    ax2 = fig.add_subplot(gs[0, 2])
+    cax2 = ax2.pcolormesh(ds['XC'] * 1e-3,
+                          -ds['Zl'],
+                          ds['psir'].sel(time=np.timedelta64(35, 'D'),
+                                         method='nearest'),
+                          cmap=cmo.balance, shading='nearest',
+                          vmin=-clim, vmax=clim, rasterized=True)
+
+    ax0.set_ylim(1200, 0)
+    ax1.set_ylim(1200, 0)
+    ax2.set_ylim(1200, 0)
+
+    ax0.set_facecolor('grey')
+    ax1.set_facecolor('grey')
+    ax2.set_facecolor('grey')
+
+    ax0.set_xlim(0, 200)
+    ax1.set_xlim(0, 200)
+    ax2.set_xlim(0, 200)
+
+    ax0.set_title('1 weeks')
+    ax1.set_title('3 weeks')
+    ax2.set_title('5 weeks')
+    
+    ax0.set_title('(a)', loc='left')
+    ax1.set_title('(b)', loc='left')
+    ax2.set_title('(c)', loc='left')
+
+    fig.suptitle('Overturning streamfunction in a 2D model')
+
+    ax0.set_ylabel('Depth (m)')
+    ax1.set_xlabel('Longitude (km)')
+
+    ax1.set_yticklabels([])
+    ax2.set_yticklabels([])
+    
+    fmt = ScalarFormatter(useMathText=True)
+    fmt.set_powerlimits((0, 0))
+    cbax = fig.add_subplot(gs[1, :])
+    cb = fig.colorbar(cax0, cax=cbax, orientation='horizontal',
+                      label='$\psi$ (m$^2\\,$s$^{-1}$)', format=fmt)
+
+    fig.tight_layout()
+
+    fig.savefig(figure_path / '2d_overturning.pdf', dpi=dpi)
