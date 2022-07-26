@@ -55,8 +55,8 @@ plt.rcParams['axes.titlesize'] = 12
 # output
 dpi = 600
 
-potential_vorticity = True
-overturning_streamfunction = True
+potential_vorticity = False
+overturning_streamfunction = False
 
 ds = xr.open_mfdataset(run_path.glob('proc*.nc'))
 ds = ds.drop_vars(['XC', 'XG'])
@@ -240,3 +240,25 @@ if overturning_streamfunction:
     fig.tight_layout()
 
     fig.savefig(figure_path / '2d_overturning.pdf', dpi=dpi)
+
+
+def create_encoding_for_ds(ds, clevel):
+    compressor = zarr.Blosc(cname="zstd", clevel=clevel, shuffle=2)
+    enc = {x: {"compressor": compressor} for x in ds}
+    return enc
+
+days = 24 * 60 * 60
+
+
+wvel_subsetting = True
+if wvel_subsetting:
+    runs = ['2DStandardNoSlip', '2DViscousNoSlip']
+    for run in runs[:1]:
+        run_path = interim_path / run / 'procVELO.nc'
+        ds = xr.open_dataset(run_path)
+        t = np.arange(0, 50 * days, 7 * days)
+        ds_subset = ds['WVEL'].sel(T=t, Zl=-50, method='nearest').to_dataset(name='WVEL')
+        out_name = processed_path / ('2DWVEL50m' + run_name + '.zarr')
+        print(out_name)
+        enc = create_encoding_for_ds(ds_subset, 5)
+        ds_subset.to_zarr(out_name, mode='w', encoding=enc)
