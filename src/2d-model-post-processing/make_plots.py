@@ -10,6 +10,7 @@ from pathlib import Path
 
 logging.info('Importing third party python libraries')
 import numpy as np
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 from matplotlib import font_manager as fm
@@ -52,13 +53,21 @@ if fpath != None:
     plt.rcParams['font.sans-serif'] = [font_prop.get_name()]
 
 # font size
-plt.rc('xtick', labelsize='10')
-plt.rc('ytick', labelsize='10')
+mpl.use("pgf")
+plt.rc('xtick', labelsize='8')
+plt.rc('ytick', labelsize='8')
+plt.rcParams['axes.titlesize'] = 10
+plt.rcParams["text.latex.preamble"] = "\\usepackage{euler} \\usepackage{paratype}  \\usepackage{mathfont} \\mathfont[digits]{PT Sans}"
+plt.rcParams["pgf.preamble"] = plt.rcParams["text.latex.preamble"]
 plt.rc('text', usetex=False)
-plt.rcParams['axes.titlesize'] = 12
+
 
 # output
 dpi = 600
+
+
+potential_vorticity = True
+streamfunction = True
 
 
 def open_dataset(run_name):
@@ -93,16 +102,17 @@ def open_dataset(run_name):
     ds['rho'] = pvcalc.calculate_density(ds['RHOAnoma'], ds['rhoRef'])
     ds['b'] = pvcalc.calculate_buoyancy(ds['rho'])
 
-    ds['db_dx'], ds['db_dy'], ds['db_dz'] = pvcalc.calculate_grad_buoyancy(ds['b'], ds, grid)
+    grad_b = pvcalc.calculate_grad_buoyancy(ds['b'], ds, grid)
+    ds['db_dx'], ds['db_dy'], ds['db_dz'] = grad_b
+    zeta = pvcalc.calculate_curl_velocity(ds['UVEL'],
+                                          ds['VVEL'],
+                                          ds['WVEL'],
+                                          ds,
+                                          grid,no_slip_bottom,
+                                          no_slip_sides,
+                                          diff_y=False)
 
-    ds['zeta_x'], ds['zeta_y'], ds['zeta_z'] = pvcalc.calculate_curl_velocity(ds['UVEL'],
-                                                                            ds['VVEL'],
-                                                                            ds['WVEL'],
-                                                                            ds,
-                                                                            grid,no_slip_bottom,
-                                                                            no_slip_sides, diff_y=False
-                                                                            )
-
+    ds['zeta_x'], ds['zeta_y'], ds['zeta_z'] = zeta
 
     ds['Q'] = pvcalc.calculate_C_potential_vorticity(ds['zeta_x'],
                                                     ds['zeta_y'],
@@ -111,12 +121,11 @@ def open_dataset(run_name):
                                                     ds,
                                                     grid,
                                                     beta,
-                                                    f0, diff_y=False
-                                                    )
+                                                    f0,
+                                                    diff_y=False)
 
     return ds
 
-potential_vorticity = False
 
 if potential_vorticity:
     ds = open_dataset('StandardNoSlip')
@@ -181,7 +190,8 @@ if potential_vorticity:
     fmt.set_powerlimits((0, 0))
     cbax = fig.add_subplot(gs[1, :])
     cb = fig.colorbar(cax0, cax=cbax, orientation='horizontal',
-                      label='$Q$ (s$^{-3}$)', format=fmt)
+                      format=fmt)
+    cb.set_label("$Q$ (s$^{-3}$)", usetex=True)
 
     fig.tight_layout()
 
@@ -206,7 +216,6 @@ if wvel_subsetting:
         ds_subset.to_zarr(out_name, mode='w', encoding=enc)
         
         
-streamfunction = True
 if streamfunction:
     ds = open_dataset('StandardNoSlip')
     ds_invert_z = ds.isel(Z=slice(None, None, -1),
@@ -284,7 +293,8 @@ if streamfunction:
     fmt.set_powerlimits((0, 0))
     cbax = fig.add_subplot(gs[1, :])
     cb = fig.colorbar(cax0, cax=cbax, orientation='horizontal',
-                      label='$\psi$ (m$^2\\,$s$^{-1}$)', format=fmt)
+                      format=fmt)
+    cb.set_label("$\psi$ (m$^2\\,$s$^{-1}$)", usetex=True)
 
     fig.tight_layout()
 
